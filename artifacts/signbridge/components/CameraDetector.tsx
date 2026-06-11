@@ -6,7 +6,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
-import { CameraView, useCameraPermissions } from "expo-camera";
+import { CameraView, CameraType, useCameraPermissions } from "expo-camera";
 import { Feather } from "@expo/vector-icons";
 import { GestureSmoother } from "@/utils/gestureClassifier";
 
@@ -96,7 +96,7 @@ export function CameraDetector({
   return (
     <View style={{ width, height, borderRadius: 20, overflow: "hidden", backgroundColor: "#050e1f" }}>
       {hasCamera && permission?.granted ? (
-        <CameraView style={StyleSheet.absoluteFill} facing={facing} />
+        <CameraView style={StyleSheet.absoluteFill} facing={facing === "user" ? "front" : "back"} />
       ) : (
         <View style={[StyleSheet.absoluteFill, styles.placeholder]}>
           <Feather name="camera" size={36} color={primaryColor} />
