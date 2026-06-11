@@ -1,5 +1,5 @@
 import React from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { Feather } from "@expo/vector-icons";
 import { useColors } from "@/hooks/useColors";
 import { Message } from "@/context/AppContext";
@@ -7,9 +7,11 @@ import { Message } from "@/context/AppContext";
 interface Props {
   message: Message;
   largeText?: boolean;
+  isPlaying?: boolean;
+  onSpeak?: () => void;
 }
 
-export function MessageBubble({ message, largeText }: Props) {
+export function MessageBubble({ message, largeText, isPlaying, onSpeak }: Props) {
   const colors = useColors();
   const isDeaf = message.sender === "deaf";
 
@@ -22,7 +24,7 @@ export function MessageBubble({ message, largeText }: Props) {
     <View style={[styles.row, isDeaf ? styles.rowLeft : styles.rowRight]}>
       {isDeaf && (
         <View style={[styles.avatar, { backgroundColor: colors.primary + "33" }]}>
-          <Feather name="activity" size={14} color={colors.primary} />
+          <Feather name="camera" size={13} color={colors.primary} />
         </View>
       )}
       <View style={styles.bubbleWrap}>
@@ -52,16 +54,25 @@ export function MessageBubble({ message, largeText }: Props) {
         </View>
         <View style={[styles.meta, isDeaf ? styles.metaLeft : styles.metaRight]}>
           <Feather
-            name={message.type === "sign" ? "activity" : "mic"}
+            name={message.type === "sign" ? "camera" : "mic"}
             size={10}
             color={colors.mutedForeground}
           />
           <Text style={[styles.time, { color: colors.mutedForeground }]}>{timeStr}</Text>
+          {onSpeak && (
+            <TouchableOpacity onPress={onSpeak} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
+              <Feather
+                name={isPlaying ? "volume-x" : "volume-2"}
+                size={12}
+                color={isPlaying ? colors.primary : colors.mutedForeground}
+              />
+            </TouchableOpacity>
+          )}
         </View>
       </View>
       {!isDeaf && (
         <View style={[styles.avatar, { backgroundColor: colors.accent + "33" }]}>
-          <Feather name="mic" size={14} color={colors.accent} />
+          <Feather name="mic" size={13} color={colors.accent} />
         </View>
       )}
     </View>
@@ -85,7 +96,7 @@ const styles = StyleSheet.create({
   senderLabel: { fontSize: 11, fontFamily: "Inter_500Medium", marginHorizontal: 4 },
   bubble: { borderRadius: 16, paddingHorizontal: 14, paddingVertical: 10, borderWidth: 1 },
   text: { fontFamily: "Inter_400Regular", lineHeight: 22 },
-  meta: { flexDirection: "row", alignItems: "center", gap: 4, marginHorizontal: 4 },
+  meta: { flexDirection: "row", alignItems: "center", gap: 5, marginHorizontal: 4 },
   metaLeft: { justifyContent: "flex-start" },
   metaRight: { justifyContent: "flex-end" },
   time: { fontSize: 10, fontFamily: "Inter_400Regular" },

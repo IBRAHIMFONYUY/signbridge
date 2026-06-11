@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   FlatList,
   Platform,
@@ -9,6 +9,7 @@ import {
 } from "react-native";
 import { Feather } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
+import * as Speech from "expo-speech";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useColors } from "@/hooks/useColors";
 import { useApp, Message } from "@/context/AppContext";
@@ -20,8 +21,18 @@ export default function ConversationScreen() {
   const { messages, clearMessages, settings } = useApp();
   const listRef = useRef<FlatList>(null);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [playingId, setPlayingId] = useState<string | null>(null);
   const fontSize = settings.largeText ? 1.2 : 1;
   const topPad = Platform.OS === "web" ? 67 : insets.top;
+  const prevLength = useRef(messages.length);
+
+  /* Auto-scroll when new message arrives */
+  useEffect(() => {
+    if (messages.length > prevLength.current) {
+      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 80);
+    }
+    prevLength.current = messages.length;
+  }, [messages.length]);
 
   const handleClear = useCallback(() => {
     if (!showClearConfirm) {
@@ -31,14 +42,41 @@ export default function ConversationScreen() {
     }
     clearMessages();
     setShowClearConfirm(false);
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+    if (Platform.OS !== "web") {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+    }
   }, [showClearConfirm, clearMessages]);
+
+  const speakMessage = useCallback(
+    (msg: Message) => {
+      if (playingId === msg.id) {
+        Speech.stop();
+        setPlayingId(null);
+        return;
+      }
+      Speech.stop();
+      setPlayingId(msg.id);
+      Speech.speak(msg.text, {
+        rate: settings.speechRate,
+        language: "en-US",
+        onDone: () => setPlayingId(null),
+        onStopped: () => setPlayingId(null),
+        onError: () => setPlayingId(null),
+      });
+    },
+    [playingId, settings.speechRate]
+  );
 
   const renderItem = useCallback(
     ({ item }: { item: Message }) => (
-      <MessageBubble message={item} largeText={settings.largeText} />
+      <MessageBubble
+        message={item}
+        largeText={settings.largeText}
+        isPlaying={playingId === item.id}
+        onSpeak={() => speakMessage(item)}
+      />
     ),
-    [settings.largeText]
+    [settings.largeText, playingId, speakMessage]
   );
 
   const keyExtractor = useCallback((item: Message) => item.id, []);
@@ -52,10 +90,24 @@ export default function ConversationScreen() {
         No messages yet
       </Text>
       <Text style={[styles.emptySub, { color: colors.mutedForeground, fontSize: 13 * fontSize }]}>
-        Start signing or speaking in the Sign or Speech tabs to begin a conversation.
+        Use the Sign tab to translate gestures, or Speech tab to convert voice — messages appear here.
       </Text>
+      <View style={styles.emptyHints}>
+        {[
+          { icon: "camera" as const, text: "Sign Mode → gesture → send" },
+          { icon: "mic" as const, text: "Speech Mode → speak or type → send" },
+        ].map(({ icon, text }) => (
+          <View key={text} style={[styles.emptyHint, { backgroundColor: colors.muted, borderColor: colors.border }]}>
+            <Feather name={icon} size={14} color={colors.primary} />
+            <Text style={[styles.emptyHintText, { color: colors.foreground, fontSize: 12 * fontSize }]}>{text}</Text>
+          </View>
+        ))}
+      </View>
     </View>
   );
+
+  const deafCount = messages.filter((m) => m.sender === "deaf").length;
+  const hearingCount = messages.filter((m) => m.sender === "hearing").length;
 
   return (
     <View style={{ flex: 1, backgroundColor: colors.background }}>
@@ -74,8 +126,8 @@ export default function ConversationScreen() {
           <Text style={[styles.headerTitle, { color: colors.foreground, fontSize: 17 * fontSize }]}>
             Conversation
           </Text>
-          <Text style={[styles.headerSub, { color: colors.mutedForeground, fontSize: 12 * fontSize }]}>
-            {messages.length} messages
+          <Text style={[styles.headerSub, { color: colors.mutedForeground, fontSize: 11 * fontSize }]}>
+            {deafCount} sign{deafCount !== 1 ? "s" : ""} · {hearingCount} speech
           </Text>
         </View>
         {messages.length > 0 && (
@@ -97,10 +149,7 @@ export default function ConversationScreen() {
             <Text
               style={[
                 styles.clearText,
-                {
-                  color: showClearConfirm ? colors.destructive : colors.mutedForeground,
-                  fontSize: 12 * fontSize,
-                },
+                { color: showClearConfirm ? colors.destructive : colors.mutedForeground, fontSize: 12 * fontSize },
               ]}
             >
               {showClearConfirm ? "Confirm" : "Clear"}
@@ -114,13 +163,19 @@ export default function ConversationScreen() {
         <View style={styles.legendItem}>
           <View style={[styles.legendDot, { backgroundColor: colors.primary }]} />
           <Text style={[styles.legendText, { color: colors.mutedForeground, fontSize: 11 * fontSize }]}>
-            Deaf User (Signs)
+            Deaf User · Signs
           </Text>
         </View>
         <View style={styles.legendItem}>
           <View style={[styles.legendDot, { backgroundColor: colors.accent }]} />
           <Text style={[styles.legendText, { color: colors.mutedForeground, fontSize: 11 * fontSize }]}>
-            Hearing User (Speech)
+            Hearing User · Speech
+          </Text>
+        </View>
+        <View style={[styles.legendItem, { marginLeft: "auto" }]}>
+          <Feather name="volume-2" size={10} color={colors.mutedForeground} />
+          <Text style={[styles.legendText, { color: colors.mutedForeground, fontSize: 11 * fontSize }]}>
+            Tap to replay
           </Text>
         </View>
       </View>
@@ -138,13 +193,7 @@ export default function ConversationScreen() {
             flexGrow: 1,
           },
         ]}
-        scrollEnabled={!!messages.length}
         showsVerticalScrollIndicator={false}
-        onContentSizeChange={() => {
-          if (messages.length > 0) {
-            listRef.current?.scrollToEnd({ animated: true });
-          }
-        }}
       />
     </View>
   );
@@ -173,17 +222,28 @@ const styles = StyleSheet.create({
   clearText: { fontFamily: "Inter_500Medium" },
   legend: {
     flexDirection: "row",
-    gap: 20,
-    paddingHorizontal: 20,
-    paddingVertical: 8,
+    gap: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 7,
     borderBottomWidth: StyleSheet.hairlineWidth,
+    alignItems: "center",
   },
-  legendItem: { flexDirection: "row", alignItems: "center", gap: 6 },
-  legendDot: { width: 8, height: 8, borderRadius: 4 },
+  legendItem: { flexDirection: "row", alignItems: "center", gap: 5 },
+  legendDot: { width: 7, height: 7, borderRadius: 3.5 },
   legendText: { fontFamily: "Inter_400Regular" },
   list: { paddingTop: 12 },
-  emptyState: { flex: 1, alignItems: "center", justifyContent: "center", padding: 40, gap: 16 },
-  emptyIcon: { width: 70, height: 70, borderRadius: 35, justifyContent: "center", alignItems: "center" },
+  emptyState: { flex: 1, alignItems: "center", justifyContent: "center", padding: 36, gap: 14 },
+  emptyIcon: { width: 68, height: 68, borderRadius: 34, justifyContent: "center", alignItems: "center" },
   emptyTitle: { fontFamily: "Inter_600SemiBold", textAlign: "center" },
-  emptySub: { fontFamily: "Inter_400Regular", textAlign: "center", lineHeight: 20 },
+  emptySub: { fontFamily: "Inter_400Regular", textAlign: "center", lineHeight: 20, marginBottom: 4 },
+  emptyHints: { gap: 8, width: "100%" },
+  emptyHint: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    padding: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+  },
+  emptyHintText: { fontFamily: "Inter_400Regular" },
 });
