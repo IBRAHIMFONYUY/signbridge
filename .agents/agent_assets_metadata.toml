@@ -1,0 +1,8 @@
+uploads = []
+outputs = []
+
+[[generated]]
+id = "zci76Ml-1Ke4rTC-KML8G"
+uri = "file://artifacts/signbridge/assets/images/icon.png"
+type = "image"
+title = "generated_image"
