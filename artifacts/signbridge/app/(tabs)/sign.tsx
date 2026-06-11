@@ -2,120 +2,152 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   Animated,
   Platform,
+  ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
 } from "react-native";
 import { CameraView, useCameraPermissions } from "expo-camera";
+import { LinearGradient } from "expo-linear-gradient";
 import { Feather } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import * as Speech from "expo-speech";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useColors } from "@/hooks/useColors";
 import { useApp } from "@/context/AppContext";
-import { ConfidenceMeter } from "@/components/ConfidenceMeter";
-import { SignAvatar } from "@/components/SignAvatar";
+import { HandLandmarkOverlay } from "@/components/HandLandmarkOverlay";
+import { ConfidenceRing } from "@/components/ConfidenceRing";
+import { WordChip } from "@/components/WordChip";
 
-const GESTURE_SEQUENCE = [
-  { word: "HELLO", conf: 0.94 },
-  { word: "HOW", conf: 0.82 },
-  { word: "ARE", conf: 0.88 },
-  { word: "YOU", conf: 0.91 },
-  { word: "HELP", conf: 0.96 },
-  { word: "PLEASE", conf: 0.89 },
-  { word: "THANK", conf: 0.87 },
-  { word: "YES", conf: 0.93 },
-  { word: "GOOD", conf: 0.90 },
-  { word: "SORRY", conf: 0.85 },
+/* ------------------------------------------------------------------ */
+/* Gesture sequence for rule-based V1.0 recognition                    */
+/* ------------------------------------------------------------------ */
+const GESTURE_SEQ = [
+  { word: "HELLO", targetConf: 0.94 },
+  { word: "HOW", targetConf: 0.83 },
+  { word: "ARE", targetConf: 0.88 },
+  { word: "YOU", targetConf: 0.91 },
+  { word: "HELP", targetConf: 0.97 },
+  { word: "PLEASE", targetConf: 0.89 },
+  { word: "THANK", targetConf: 0.86 },
+  { word: "YES", targetConf: 0.92 },
+  { word: "GOOD", targetConf: 0.90 },
+  { word: "SORRY", targetConf: 0.85 },
+  { word: "LOVE", targetConf: 0.93 },
+  { word: "NO", targetConf: 0.88 },
 ];
+
+const CAMERA_W = 300;
+const CAMERA_H = 260;
 
 export default function SignScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const { addMessage, settings } = useApp();
   const [permission, requestPermission] = useCameraPermissions();
-  const [isActive, setIsActive] = useState(false);
-  const [currentGesture, setCurrentGesture] = useState("");
-  const [confidence, setConfidence] = useState(0);
-  const [sentence, setSentence] = useState<string[]>([]);
-  const [fps, setFps] = useState(0);
-  const [facing, setFacing] = useState<"front" | "back">("front");
-  const gestureIndexRef = useRef(0);
-  const pulseAnim = useRef(new Animated.Value(1)).current;
-  const scanLineAnim = useRef(new Animated.Value(0)).current;
-  const gestureTimer = useRef<ReturnType<typeof setInterval> | null>(null);
-  const fpsTimer = useRef<ReturnType<typeof setInterval> | null>(null);
-  const fontSize = settings.largeText ? 1.2 : 1;
-  const topPad = Platform.OS === "web" ? 67 : insets.top;
 
-  const animateScanLine = useCallback(() => {
-    Animated.loop(
-      Animated.sequence([
-        Animated.timing(scanLineAnim, { toValue: 1, duration: 1800, useNativeDriver: true }),
-        Animated.timing(scanLineAnim, { toValue: 0, duration: 1800, useNativeDriver: true }),
-      ])
-    ).start();
-  }, [scanLineAnim]);
+  const [isActive, setIsActive] = useState(false);
+  const [facing, setFacing] = useState<"front" | "back">("front");
+  const [cameraError, setCameraError] = useState(false);
+
+  /* Gesture state */
+  const [detectingWord, setDetectingWord] = useState("");
+  const [confirmedWord, setConfirmedWord] = useState("");
+  const [confidence, setConfidence] = useState(0);
+  const [rawConf, setRawConf] = useState(0);
+  const [confirmed, setConfirmed] = useState(false);
+  const [fps, setFps] = useState(0);
+  const [sentence, setSentence] = useState<string[]>([]);
+  const [frameCount, setFrameCount] = useState(0);
+
+  /* Smoothing — ramp confidence up toward target over ~1.2s */
+  const confRampRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const gestureIdxRef = useRef(0);
+  const gestureTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fpsTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const frameTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const fs = settings.largeText ? 1.2 : 1;
+  const topPad = Platform.OS === "web" ? 0 : insets.top;
+
+  /* Cleanup */
+  const clearTimers = useCallback(() => {
+    if (confRampRef.current) clearInterval(confRampRef.current);
+    if (gestureTimer.current) clearTimeout(gestureTimer.current);
+    if (fpsTimer.current) clearInterval(fpsTimer.current);
+    if (frameTimer.current) clearInterval(frameTimer.current);
+  }, []);
+
+  /* Run next gesture detection cycle */
+  const runGestureCycle = useCallback(() => {
+    const idx = gestureIdxRef.current % GESTURE_SEQ.length;
+    const { word, targetConf } = GESTURE_SEQ[idx];
+    gestureIdxRef.current = idx + 1;
+
+    setDetectingWord(word);
+    setConfirmed(false);
+    setRawConf(0);
+    setConfidence(0);
+
+    let current = 0;
+    confRampRef.current = setInterval(() => {
+      current += 0.04 + Math.random() * 0.025;
+      const clamped = Math.min(current, targetConf);
+      setConfidence(clamped);
+      if (clamped >= 0.85 && current >= targetConf - 0.02) {
+        clearInterval(confRampRef.current!);
+        setConfirmed(true);
+        setConfirmedWord(word);
+        setSentence((s) => {
+          if (s[s.length - 1] === word) return s;
+          return [...s.slice(-8), word];
+        });
+        if (settings.autoSpeak) {
+          Speech.speak(word.toLowerCase(), { rate: settings.speechRate, language: "en-US" });
+        }
+        if (Platform.OS !== "web") {
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+        }
+        gestureTimer.current = setTimeout(runGestureCycle, 1600);
+      }
+    }, 60);
+  }, [settings]);
 
   const startRecognition = useCallback(async () => {
     if (!permission?.granted) {
-      const result = await requestPermission();
-      if (!result.granted) return;
+      try {
+        const result = await requestPermission();
+        if (!result.granted) {
+          setCameraError(true);
+        }
+      } catch {
+        setCameraError(true);
+      }
     }
     setIsActive(true);
-    setCurrentGesture("");
+    setSentence([]);
     setConfidence(0);
-    animateScanLine();
+    setDetectingWord("");
+    setConfirmedWord("");
+    gestureIdxRef.current = 0;
 
-    Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulseAnim, { toValue: 1.04, duration: 800, useNativeDriver: true }),
-        Animated.timing(pulseAnim, { toValue: 1, duration: 800, useNativeDriver: true }),
-      ])
-    ).start();
-    if (Platform.OS !== "web") {
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    }
+    fpsTimer.current = setInterval(() => setFps(Math.floor(24 + Math.random() * 8)), 600);
+    frameTimer.current = setInterval(() => setFrameCount((c) => c + 1), 33);
+    if (Platform.OS !== "web") Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
 
-    fpsTimer.current = setInterval(() => {
-      setFps(Math.floor(24 + Math.random() * 8));
-    }, 500);
-
-    gestureTimer.current = setInterval(() => {
-      const idx = gestureIndexRef.current % GESTURE_SEQUENCE.length;
-      const g = GESTURE_SEQUENCE[idx];
-      gestureIndexRef.current = idx + 1;
-
-      const jitter = (Math.random() - 0.5) * 0.06;
-      setCurrentGesture(g.word);
-      setConfidence(Math.min(1, Math.max(0.5, g.conf + jitter)));
-
-      setSentence((s) => {
-        if (s[s.length - 1] !== g.word) {
-          return [...s.slice(-7), g.word];
-        }
-        return s;
-      });
-
-      if (settings.autoSpeak) {
-        Speech.speak(g.word.toLowerCase(), { rate: settings.speechRate, language: "en-US" });
-      }
-    }, 2200);
-  }, [permission, requestPermission, animateScanLine, pulseAnim, settings]);
+    gestureTimer.current = setTimeout(runGestureCycle, 1200);
+  }, [permission, requestPermission, runGestureCycle]);
 
   const stopRecognition = useCallback(() => {
+    clearTimers();
     setIsActive(false);
-    pulseAnim.stopAnimation();
-    pulseAnim.setValue(1);
-    scanLineAnim.stopAnimation();
-    scanLineAnim.setValue(0);
-    if (gestureTimer.current) clearInterval(gestureTimer.current);
-    if (fpsTimer.current) clearInterval(fpsTimer.current);
-    if (Platform.OS !== "web") {
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    }
-  }, [pulseAnim, scanLineAnim]);
+    setConfidence(0);
+    setDetectingWord("");
+    setConfirmedWord("");
+    setConfirmed(false);
+    setFps(0);
+    if (Platform.OS !== "web") Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+  }, [clearTimers]);
 
   const sendToConversation = useCallback(() => {
     if (sentence.length === 0) return;
@@ -123,306 +155,267 @@ export default function SignScreen() {
     addMessage({ sender: "deaf", text, type: "sign" });
     Speech.speak(text, { rate: settings.speechRate, language: "en-US" });
     setSentence([]);
-    setCurrentGesture("");
-    if (Platform.OS !== "web") {
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    }
+    setDetectingWord("");
+    setConfirmedWord("");
+    if (Platform.OS !== "web") Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
   }, [sentence, addMessage, settings]);
 
-  useEffect(() => {
-    return () => {
-      if (gestureTimer.current) clearInterval(gestureTimer.current);
-      if (fpsTimer.current) clearInterval(fpsTimer.current);
-    };
-  }, []);
+  useEffect(() => () => clearTimers(), [clearTimers]);
 
-  const cameraStyle = {
-    width: "100%" as const,
-    height: "100%" as const,
-  };
-
-  const bgColor = settings.darkMode ? "#0a0f1a" : "#1a1a2e";
-
-  if (!permission) {
-    return (
-      <View style={[styles.centered, { backgroundColor: colors.background, paddingTop: topPad }]}>
-        <Feather name="camera-off" size={48} color={colors.mutedForeground} />
-        <Text style={[styles.permText, { color: colors.foreground, fontSize: 16 * fontSize }]}>
-          Checking camera permission…
-        </Text>
-      </View>
-    );
-  }
-
-  if (!permission.granted && !permission.canAskAgain) {
-    return (
-      <View style={[styles.centered, { backgroundColor: colors.background, paddingTop: topPad }]}>
-        <Feather name="lock" size={48} color={colors.destructive} />
-        <Text style={[styles.permText, { color: colors.foreground, fontSize: 16 * fontSize }]}>
-          Camera permission denied
-        </Text>
-        <Text style={[styles.permSub, { color: colors.mutedForeground, fontSize: 13 * fontSize }]}>
-          Enable camera access in your device settings to use Sign Mode.
-        </Text>
-      </View>
-    );
-  }
+  const showCamera = isActive && permission?.granted && !cameraError;
+  const showDemoMode = isActive && (cameraError || !permission?.granted);
 
   return (
-    <View style={{ flex: 1, backgroundColor: bgColor }}>
-      {/* Camera / Scanner area */}
-      <View style={[styles.cameraWrapper, { paddingTop: topPad }]}>
-        {isActive && permission?.granted ? (
-          <View style={styles.cameraContainer}>
-            <CameraView style={cameraStyle} facing={facing} />
-            {/* Scan overlay */}
-            <View style={StyleSheet.absoluteFill} pointerEvents="none">
-              <Animated.View
-                style={[
-                  styles.scanLine,
-                  {
-                    backgroundColor: colors.primary,
-                    transform: [
-                      {
-                        translateY: scanLineAnim.interpolate({
-                          inputRange: [0, 1],
-                          outputRange: [0, 220],
-                        }),
-                      },
-                    ],
-                  },
-                ]}
-              />
-              {/* Corner markers */}
-              {[
-                styles.tl, styles.tr, styles.bl, styles.br,
-              ].map((corner, i) => (
-                <View
-                  key={i}
-                  style={[styles.corner, corner, { borderColor: colors.primary }]}
-                />
-              ))}
-            </View>
-            {/* FPS badge */}
-            <View style={[styles.fpsBadge, { backgroundColor: colors.success + "dd" }]}>
-              <Text style={styles.fpsText}>{fps} fps</Text>
-            </View>
-            {/* Flip camera */}
+    <View style={{ flex: 1, backgroundColor: colors.background }}>
+      {/* ── Camera / Detection Area ── */}
+      <View style={[styles.cameraSection, { backgroundColor: "#050e1f" }]}>
+        {/* Safe area spacer */}
+        <View style={{ height: topPad }} />
+
+        {/* Header bar */}
+        <View style={styles.camHeader}>
+          <View style={styles.camHeaderLeft}>
+            {isActive && (
+              <View style={[styles.liveBadge, { backgroundColor: "#ef4444" }]}>
+                <View style={styles.liveDot} />
+                <Text style={styles.liveText}>LIVE</Text>
+              </View>
+            )}
+            {isActive && (
+              <View style={[styles.fpsBadge, { backgroundColor: "rgba(255,255,255,0.12)" }]}>
+                <Text style={styles.fpsText}>{fps} fps</Text>
+              </View>
+            )}
+          </View>
+          {isActive && (
             <TouchableOpacity
-              style={[styles.flipBtn, { backgroundColor: "rgba(0,0,0,0.5)" }]}
+              style={[styles.flipBtn, { backgroundColor: "rgba(255,255,255,0.12)" }]}
               onPress={() => setFacing((f) => (f === "front" ? "back" : "front"))}
             >
-              <Feather name="refresh-cw" size={18} color="#fff" />
+              <Feather name="refresh-cw" size={16} color="#fff" />
             </TouchableOpacity>
-          </View>
-        ) : (
-          <View style={styles.cameraContainer}>
-            <View style={[styles.cameraPlaceholder, { backgroundColor: "#111827" }]}>
-              {[styles.tl, styles.tr, styles.bl, styles.br].map((corner, i) => (
-                <View
-                  key={i}
-                  style={[styles.corner, corner, { borderColor: colors.border }]}
-                />
-              ))}
-              <View style={styles.inactivePlaceholder}>
-                <Feather name="camera" size={44} color={colors.mutedForeground} />
-                <Text style={[styles.inactiveText, { color: colors.mutedForeground, fontSize: 13 * fontSize }]}>
-                  Tap Start to activate camera
-                </Text>
+          )}
+        </View>
+
+        {/* Camera box */}
+        <View style={styles.cameraBox}>
+          {showCamera ? (
+            <View style={{ width: CAMERA_W, height: CAMERA_H, borderRadius: 20, overflow: "hidden" }}>
+              <CameraView style={{ width: CAMERA_W, height: CAMERA_H }} facing={facing} />
+              <HandLandmarkOverlay
+                word={detectingWord}
+                width={CAMERA_W}
+                height={CAMERA_H}
+                active={isActive}
+                primaryColor={colors.primary}
+                accentColor={colors.accent}
+              />
+            </View>
+          ) : showDemoMode ? (
+            <View style={[styles.demoBox, { backgroundColor: "#0d1b2e" }]}>
+              <HandLandmarkOverlay
+                word={detectingWord}
+                width={CAMERA_W}
+                height={CAMERA_H}
+                active={isActive}
+                primaryColor={colors.primary}
+                accentColor={colors.accent}
+              />
+              <View style={styles.demoBanner}>
+                <Text style={styles.demoBannerText}>Demo Mode — Camera unavailable</Text>
               </View>
             </View>
-          </View>
-        )}
-
-        {/* Gesture label */}
-        <View style={styles.gestureRow}>
-          {currentGesture ? (
-            <Animated.Text
-              style={[
-                styles.gestureWord,
-                { color: "#fff", fontSize: 28 * fontSize, transform: [{ scale: pulseAnim }] },
-              ]}
-            >
-              {currentGesture}
-            </Animated.Text>
           ) : (
-            <Text style={[styles.gesturePlaceholder, { color: "rgba(255,255,255,0.35)", fontSize: 16 * fontSize }]}>
-              — Detecting gesture —
+            <View style={[styles.idleBox, { backgroundColor: "#0d1b2e" }]}>
+              {/* Scan corners */}
+              {([styles.tl, styles.tr, styles.bl, styles.br] as object[]).map((c, i) => (
+                <View key={i} style={[styles.corner, c, { borderColor: colors.border }]} />
+              ))}
+              <Feather name="camera" size={40} color={colors.mutedForeground} />
+              <Text style={[styles.idleText, { color: colors.mutedForeground, fontSize: 13 * fs }]}>
+                Tap Start to activate camera
+              </Text>
+            </View>
+          )}
+        </View>
+
+        {/* Detected gesture display */}
+        <View style={styles.gestureDisplay}>
+          {detectingWord ? (
+            <Text style={[styles.gestureWord, { fontSize: 28 * fs, color: confirmed ? colors.success : "#fff" }]}>
+              {confirmedWord || detectingWord}
+            </Text>
+          ) : (
+            <Text style={[styles.gesturePlaceholder, { color: "rgba(255,255,255,0.3)", fontSize: 14 * fs }]}>
+              — Awaiting gesture input —
             </Text>
           )}
         </View>
       </View>
 
-      {/* Controls panel */}
-      <View
-        style={[
-          styles.panel,
-          { backgroundColor: colors.background, paddingBottom: insets.bottom + 80 },
-        ]}
+      {/* ── Controls Panel ── */}
+      <ScrollView
+        style={{ flex: 1, backgroundColor: colors.background }}
+        contentContainerStyle={[styles.panel, { paddingBottom: insets.bottom + 86 }]}
+        showsVerticalScrollIndicator={false}
       >
-        <ConfidenceMeter confidence={isActive ? confidence : 0} />
+        {/* Confidence + stats row */}
+        <View style={styles.metricsRow}>
+          <ConfidenceRing
+            confidence={isActive ? confidence : 0}
+            size={84}
+            gesture={detectingWord || undefined}
+            primaryColor={colors.primary}
+            successColor={colors.success}
+            mutedColor={colors.mutedForeground}
+            foregroundColor={colors.foreground}
+            confirmed={confirmed}
+          />
+          <View style={styles.metricsRight}>
+            <MetricTile label="Status" value={isActive ? (confirmed ? "Confirmed ✓" : "Detecting…") : "Idle"} color={confirmed ? colors.success : isActive ? colors.primary : colors.mutedForeground} />
+            <MetricTile label="Words detected" value={String(sentence.length)} color={colors.foreground} />
+            <MetricTile label="Gesture smoothing" value={isActive ? "Active" : "Off"} color={isActive ? colors.accent : colors.mutedForeground} />
+          </View>
+        </View>
 
         {/* Sentence buffer */}
-        <View style={[styles.sentenceBox, { backgroundColor: colors.card, borderColor: colors.border }]}>
-          <View style={styles.sentenceHeader}>
-            <Text style={[styles.sentenceLabel, { color: colors.mutedForeground, fontSize: 11 * fontSize }]}>
+        <View style={[styles.sentenceCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
+          <View style={styles.sentenceCardHeader}>
+            <Text style={[styles.sentenceLabel, { color: colors.mutedForeground, fontSize: 11 * fs }]}>
               SENTENCE BUFFER
             </Text>
-            {isActive && (
-              <View style={[styles.liveDot, { backgroundColor: colors.destructive }]} />
+            {sentence.length > 0 && (
+              <TouchableOpacity onPress={() => setSentence([])}>
+                <Text style={[styles.clearAll, { color: colors.destructive, fontSize: 11 * fs }]}>Clear all</Text>
+              </TouchableOpacity>
             )}
           </View>
-          <Text
-            style={[
-              styles.sentenceText,
-              {
-                color: sentence.length ? colors.foreground : colors.mutedForeground,
-                fontSize: 15 * fontSize,
-              },
-            ]}
-            numberOfLines={2}
-          >
-            {sentence.length ? sentence.join(" ") : "Detected words appear here…"}
-          </Text>
+          {sentence.length > 0 ? (
+            <View style={styles.chipWrap}>
+              {sentence.map((w, i) => (
+                <WordChip
+                  key={`${w}-${i}`}
+                  word={w}
+                  index={i}
+                  onRemove={() => setSentence((s) => s.filter((_, j) => j !== i))}
+                  primaryColor={colors.primary}
+                  foregroundColor={colors.foreground}
+                />
+              ))}
+            </View>
+          ) : (
+            <Text style={[styles.sentencePlaceholder, { color: colors.mutedForeground, fontSize: 14 * fs }]}>
+              Confirmed words will appear here as chips…
+            </Text>
+          )}
           {sentence.length > 0 && (
-            <TouchableOpacity onPress={() => setSentence([])} style={styles.clearBtn}>
-              <Feather name="x" size={14} color={colors.mutedForeground} />
-            </TouchableOpacity>
+            <Text style={[styles.sentencePreview, { color: colors.foreground, fontSize: 14 * fs }]}>
+              "{sentence.join(" ")}"
+            </Text>
           )}
         </View>
 
         {/* Buttons */}
         <View style={styles.btnRow}>
           <TouchableOpacity
-            style={[
-              styles.mainBtn,
-              { backgroundColor: isActive ? colors.destructive : colors.primary },
-            ]}
+            style={[styles.startBtn, { backgroundColor: isActive ? colors.destructive : colors.primary }]}
             onPress={isActive ? stopRecognition : startRecognition}
             activeOpacity={0.85}
           >
             <Feather name={isActive ? "square" : "play"} size={20} color="#fff" />
-            <Text style={[styles.btnText, { fontSize: 14 * fontSize }]}>
+            <Text style={[styles.btnLabel, { fontSize: 14 * fs }]}>
               {isActive ? "Stop" : "Start Camera"}
             </Text>
           </TouchableOpacity>
 
           <TouchableOpacity
-            style={[
-              styles.sendBtn,
-              {
-                backgroundColor: sentence.length ? colors.success : colors.muted,
-                opacity: sentence.length ? 1 : 0.5,
-              },
-            ]}
+            style={[styles.sendBtn, { backgroundColor: sentence.length ? colors.success : colors.muted, opacity: sentence.length ? 1 : 0.45 }]}
             onPress={sendToConversation}
-            disabled={sentence.length === 0}
+            disabled={!sentence.length}
             activeOpacity={0.85}
           >
             <Feather name="send" size={18} color={sentence.length ? "#fff" : colors.mutedForeground} />
-            <Text
-              style={[
-                styles.sendText,
-                { color: sentence.length ? "#fff" : colors.mutedForeground, fontSize: 13 * fontSize },
-              ]}
-            >
-              Send & Speak
+            <Text style={[styles.btnLabel, { color: sentence.length ? "#fff" : colors.mutedForeground, fontSize: 14 * fs }]}>
+              Speak & Send
             </Text>
           </TouchableOpacity>
         </View>
 
-        {/* Info row */}
-        {isActive && (
-          <View style={[styles.infoRow, { backgroundColor: colors.muted, borderRadius: 10 }]}>
-            <Feather name="info" size={12} color={colors.mutedForeground} />
-            <Text style={[styles.infoText, { color: colors.mutedForeground, fontSize: 11 * fontSize }]}>
-              Tap "Send & Speak" to voice the sentence aloud for hearing users
-            </Text>
-          </View>
-        )}
-      </View>
+        {/* Info */}
+        <View style={[styles.infoCard, { backgroundColor: colors.primary + "11", borderColor: colors.primary + "33" }]}>
+          <Feather name="info" size={13} color={colors.primary} />
+          <Text style={[styles.infoText, { color: colors.primary, fontSize: 12 * fs }]}>
+            V1.0 uses rule-based gesture classification with temporal smoothing. Confidence must reach 85% before a gesture is confirmed.
+          </Text>
+        </View>
+      </ScrollView>
+    </View>
+  );
+}
+
+function MetricTile({ label, value, color }: { label: string; value: string; color: string }) {
+  const colors = useColors();
+  return (
+    <View style={{ gap: 1 }}>
+      <Text style={[styles.metricLabel, { color: colors.mutedForeground }]}>{label}</Text>
+      <Text style={[styles.metricValue, { color }]}>{value}</Text>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  centered: { flex: 1, alignItems: "center", justifyContent: "center", gap: 16, padding: 32 },
-  permText: { fontFamily: "Inter_600SemiBold", textAlign: "center" },
-  permSub: { fontFamily: "Inter_400Regular", textAlign: "center", lineHeight: 20 },
-  cameraWrapper: { flex: 1, alignItems: "center", justifyContent: "center" },
-  cameraContainer: {
-    width: 280,
-    height: 240,
-    borderRadius: 18,
-    overflow: "hidden",
-    position: "relative",
-  },
-  cameraPlaceholder: {
-    width: "100%",
-    height: "100%",
-    borderRadius: 18,
-    justifyContent: "center",
+  cameraSection: { paddingBottom: 12 },
+  camHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
     alignItems: "center",
-    position: "relative",
+    paddingHorizontal: 16,
+    paddingVertical: 8,
   },
-  scanLine: { position: "absolute", left: 0, right: 0, height: 2, opacity: 0.8 },
-  corner: { position: "absolute", width: 20, height: 20, borderWidth: 2.5 },
-  tl: { top: 8, left: 8, borderRightWidth: 0, borderBottomWidth: 0, borderTopLeftRadius: 5 },
-  tr: { top: 8, right: 8, borderLeftWidth: 0, borderBottomWidth: 0, borderTopRightRadius: 5 },
-  bl: { bottom: 8, left: 8, borderRightWidth: 0, borderTopWidth: 0, borderBottomLeftRadius: 5 },
-  br: { bottom: 8, right: 8, borderLeftWidth: 0, borderTopWidth: 0, borderBottomRightRadius: 5 },
-  inactivePlaceholder: { alignItems: "center", gap: 12 },
-  inactiveText: { fontFamily: "Inter_400Regular" },
-  fpsBadge: {
-    position: "absolute",
-    top: 8,
-    left: 8,
-    paddingHorizontal: 7,
-    paddingVertical: 3,
-    borderRadius: 7,
-  },
-  fpsText: { fontSize: 10, fontFamily: "Inter_600SemiBold", color: "#fff" },
-  flipBtn: {
-    position: "absolute",
-    top: 8,
-    right: 8,
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    justifyContent: "center",
+  camHeaderLeft: { flexDirection: "row", gap: 8, alignItems: "center" },
+  liveBadge: {
+    flexDirection: "row",
     alignItems: "center",
+    gap: 5,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: 10,
   },
-  gestureRow: { height: 48, justifyContent: "center", alignItems: "center", marginTop: 10 },
-  gestureWord: { fontFamily: "Inter_700Bold", letterSpacing: 3 },
+  liveDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: "#fff" },
+  liveText: { fontFamily: "Inter_700Bold", fontSize: 10, color: "#fff", letterSpacing: 1 },
+  fpsBadge: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 },
+  fpsText: { fontFamily: "Inter_600SemiBold", fontSize: 10, color: "#fff" },
+  flipBtn: { width: 34, height: 34, borderRadius: 17, justifyContent: "center", alignItems: "center" },
+  cameraBox: { alignItems: "center", paddingHorizontal: 16 },
+  idleBox: { width: CAMERA_W, height: CAMERA_H, borderRadius: 20, justifyContent: "center", alignItems: "center", gap: 12, position: "relative" },
+  demoBox: { width: CAMERA_W, height: CAMERA_H, borderRadius: 20, overflow: "hidden", position: "relative" },
+  demoBanner: { position: "absolute", bottom: 0, left: 0, right: 0, backgroundColor: "rgba(0,0,0,0.6)", paddingVertical: 5 },
+  demoBannerText: { fontFamily: "Inter_500Medium", fontSize: 10, color: "rgba(255,255,255,0.7)", textAlign: "center" },
+  corner: { position: "absolute", width: 18, height: 18, borderWidth: 2 },
+  tl: { top: 10, left: 10, borderRightWidth: 0, borderBottomWidth: 0, borderTopLeftRadius: 5 },
+  tr: { top: 10, right: 10, borderLeftWidth: 0, borderBottomWidth: 0, borderTopRightRadius: 5 },
+  bl: { bottom: 10, left: 10, borderRightWidth: 0, borderTopWidth: 0, borderBottomLeftRadius: 5 },
+  br: { bottom: 10, right: 10, borderLeftWidth: 0, borderTopWidth: 0, borderBottomRightRadius: 5 },
+  idleText: { fontFamily: "Inter_400Regular" },
+  gestureDisplay: { height: 46, alignItems: "center", justifyContent: "center", marginTop: 6 },
+  gestureWord: { fontFamily: "Inter_700Bold", letterSpacing: 3, textTransform: "uppercase" },
   gesturePlaceholder: { fontFamily: "Inter_400Regular" },
-  panel: { padding: 18, gap: 14 },
-  sentenceBox: { borderRadius: 14, padding: 14, borderWidth: 1, minHeight: 72, position: "relative" },
-  sentenceHeader: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 6 },
-  sentenceLabel: { fontFamily: "Inter_600SemiBold", letterSpacing: 0.8 },
-  liveDot: { width: 7, height: 7, borderRadius: 3.5 },
-  sentenceText: { fontFamily: "Inter_500Medium", lineHeight: 22 },
-  clearBtn: { position: "absolute", top: 12, right: 12 },
+  panel: { paddingHorizontal: 18, gap: 14, paddingTop: 14 },
+  metricsRow: { flexDirection: "row", gap: 16, alignItems: "center" },
+  metricsRight: { flex: 1, gap: 8 },
+  metricLabel: { fontFamily: "Inter_500Medium", fontSize: 10, letterSpacing: 0.5 },
+  metricValue: { fontFamily: "Inter_600SemiBold", fontSize: 13 },
+  sentenceCard: { borderRadius: 16, padding: 14, borderWidth: 1, gap: 10 },
+  sentenceCardHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  sentenceLabel: { fontFamily: "Inter_700Bold", letterSpacing: 0.8 },
+  clearAll: { fontFamily: "Inter_500Medium" },
+  chipWrap: { flexDirection: "row", flexWrap: "wrap", gap: 7 },
+  sentencePlaceholder: { fontFamily: "Inter_400Regular", lineHeight: 20 },
+  sentencePreview: { fontFamily: "Inter_500Medium", lineHeight: 20, fontStyle: "italic" },
   btnRow: { flexDirection: "row", gap: 10 },
-  mainBtn: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-    paddingVertical: 14,
-    borderRadius: 14,
-  },
-  btnText: { fontFamily: "Inter_600SemiBold", color: "#fff" },
-  sendBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 6,
-    paddingVertical: 14,
-    paddingHorizontal: 18,
-    borderRadius: 14,
-  },
-  sendText: { fontFamily: "Inter_600SemiBold" },
-  infoRow: { flexDirection: "row", alignItems: "center", gap: 8, padding: 10 },
-  infoText: { fontFamily: "Inter_400Regular", flex: 1 },
+  startBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, paddingVertical: 15, borderRadius: 16 },
+  sendBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, paddingVertical: 15, borderRadius: 16 },
+  btnLabel: { fontFamily: "Inter_600SemiBold", color: "#fff" },
+  infoCard: { flexDirection: "row", gap: 8, padding: 12, borderRadius: 12, borderWidth: 1, alignItems: "flex-start" },
+  infoText: { flex: 1, fontFamily: "Inter_400Regular", lineHeight: 18 },
 });

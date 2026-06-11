@@ -91,7 +91,6 @@ export function SignAvatar({ word, size = 120 }: Props) {
                       }),
                     },
                   ],
-                  transformOrigin: "bottom",
                 },
               ]}
             />
