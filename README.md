@@ -1,1 +1,2 @@
-# signbridge
+# MWANA CARE 
+is an inclusive digital platform designed to scale Cameroon's Positive Parenting Programme beyond face-to-face sessions. It transforms validated parenting content into personalized micro-learning, practical coaching and measurable engagement, accessible through smartphones and, progressively, USSD, SMS and voice. Our SignBridge technology ensures that families raising children with hearing disabilities can participate through sign-language experiences. MWANA CARE is designed around one principle: every parent should be able to access support, and every child should be included.
